@@ -1,3 +1,9 @@
+#profile-title: base64:TXkgV0FSUCAtIENvbmZpZw==
+#profile-update-interval: 1
+#subscription-userinfo: upload=29; download=12; total=10737418240000000; expire=2546249531
+#support-url: https://github.com/Abdulhossein/All-in-One/
+#profile-web-page-url: https://github.com/Abdulhossein/All-in-One/edit/main/my-warp
+
 warp://auto
 warp://188.114.97.236:1074/?ifp=5-10
 warp://162.159.192.8:7156/?ifp=5-10
