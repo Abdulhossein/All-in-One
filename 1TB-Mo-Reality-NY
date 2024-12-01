@@ -1,0 +1,154 @@
+{
+  "remarks": "Top reality XTLS direct vless",
+  "log": {
+    "access": "",
+    "error": "",
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ],
+        "routeOnly": false
+      },
+      "settings": {
+        "auth": "noauth",
+        "udp": true,
+        "allowTransparent": false
+      }
+    },
+    {
+      "tag": "http",
+      "port": 10809,
+      "listen": "127.0.0.1",
+      "protocol": "http",
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ],
+        "routeOnly": false
+      },
+      "settings": {
+        "auth": "noauth",
+        "udp": true,
+        "allowTransparent": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "fteproxy.org reality XTLS direct vless",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "104.168.100.33",
+            "port": 443,
+            "users": [
+              {
+                "id": "0d7c55f8-6d5e-4abe-b6ba-903a470a238c",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "level": 8
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "security": "reality",
+        "network": "tcp",
+        "realitySettings": {
+          "serverName": "fteproxy.org",
+          "fingerprint": "chrome",
+          "shortId": "58d7",
+          "publicKey": "GDKC3Wv4ZoslU92B2-iUYoPbnl8F91GfJo6zSE_MSBk",
+          "show": false
+        }
+      }
+    },
+    {
+      "tag": "fragment",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "AsIs",
+        "fragment": {
+          "packets": "tlshello",
+          "length": "10-100",
+          "interval": "50-200"
+        }
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tcpNoDelay": true,
+          "tcpKeepAliveIdle": 100
+        }
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {
+        "response": {
+          "type": "http"
+        }
+      }
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api",
+        "enabled": true
+      },
+      {
+        "id": "5465425548310166497",
+        "type": "field",
+        "outboundTag": "direct",
+        "domain": [
+          "domain:ir",
+          "geosite:cn"
+        ],
+        "enabled": true
+      },
+      {
+        "id": "5425034033205580637",
+        "type": "field",
+        "outboundTag": "direct",
+        "ip": [
+          "geoip:private",
+          "geoip:cn",
+          "geoip:ir"
+        ],
+        "enabled": true
+      },
+      {
+        "id": "5627785659655799759",
+        "type": "field",
+        "port": "0-65535",
+        "outboundTag": "proxy",
+        "enabled": true
+      }
+    ]
+  }
+}
