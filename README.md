@@ -112,11 +112,4 @@ For issues or suggestions, open a ticket on GitHub.
 
 ---
 
-📝 How to add this to your repository
-
-1. Create a new file in your repository root named README.md.
-2. Copy the entire content above into it.
-3. Commit and push.
-
-The subscription link points directly to your v2rays file. It will automatically stay up‑to‑date thanks to the GitHub Action you've already set up.
-
+📝 ...
