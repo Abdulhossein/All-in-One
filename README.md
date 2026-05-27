@@ -61,7 +61,7 @@ The GitHub Action will automatically merge them during the next update.
 
 The repository uses a scheduled GitHub Action:
 
-- **Schedule:** Runs at 00:00 on the 1st day of every month.
+- **Schedule:** Runs at 00:00 every two days.
 - **Manual trigger:** From the **Actions** tab → **Update Configs** → **Run workflow**.
 - **Live testing:** Each config is tested (TCP handshake, timeout 3s). Dead configs are removed.
 - **Header:** The top lines (starting with `#`) are never touched.
