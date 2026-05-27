@@ -1,24 +1,20 @@
 name: Update Configs
 
 on:
-  # فعال‌سازی اجرای دستی (با قابلیت دریافت لینک جدید)
   workflow_dispatch:
     inputs:
       new_subs:
-        description: 'لینک سابسکریپشن جدید (اختیاری، با کاما جدا کنید)'
+        description: 'New subscription links (comma separated)'
         required: false
         type: string
-
-  # اجرای خودکار در ساعت 00:00 روز اول هر ماه
   schedule:
     - cron: '0 0 1 * *'
 
 jobs:
   update:
     runs-on: ubuntu-latest
-
     permissions:
-      contents: write  # اجازه commit و push به مخزن
+      contents: write
 
     steps:
       - name: Checkout code
@@ -37,11 +33,7 @@ jobs:
       - name: Add new subscription links (if provided)
         if: github.event_name == 'workflow_dispatch' && inputs.new_subs
         run: |
-          # لینک‌های جدید رو به فایل subscriptions.txt اضافه کن
-          IFS=',' read -ra ADDR <<< "${{ inputs.new_subs }}"
-          for link in "${ADDR[@]}"; do
-            echo "$link" >> subscriptions.txt
-          done
+          echo "${{ inputs.new_subs }}" | tr ',' '\n' >> subscriptions.txt
 
       - name: Run config updater
         run: python config_updater.py
@@ -50,6 +42,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add v2rays subscriptions.txt
+          git add v2rays
+          # Only add subscriptions.txt if it exists
+          if [ -f subscriptions.txt ]; then git add subscriptions.txt; fi
           git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update configs [skip ci]"
           git push
