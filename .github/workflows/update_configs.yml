@@ -8,6 +8,7 @@ on:
         required: false
         type: string
   schedule:
+    # هر ۲ روز یکبار، ساعت 00:00 UTC
     - cron: '0 0 */2 * *'
 
 jobs:
@@ -43,7 +44,20 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add v2rays
-          # Only add subscriptions.txt if it exists
           if [ -f subscriptions.txt ]; then git add subscriptions.txt; fi
-          git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update configs [skip ci]"
-          git push
+          # اگر تغییری وجود ندارد، خارج شو
+          git diff --quiet && git diff --staged --quiet && exit 0
+          git commit -m "Auto-update configs [skip ci]"
+          # تلاش برای pull --rebase و push (حداکثر ۳ بار)
+          for i in 1 2 3; do
+            if git pull --rebase --strategy-option=theirs; then
+              if git push; then
+                echo "Push successful"
+                exit 0
+              fi
+            fi
+            echo "Retry $i failed, waiting 5 seconds..."
+            sleep 5
+          done
+          echo "Failed to push after 3 attempts"
+          exit 1
