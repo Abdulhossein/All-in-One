@@ -1,7 +1,7 @@
 
 # All-in-One V2Ray Config Collection
 
-![GitHub Actions](https://github.com/Abdulhossein/All-in-One/actions/workflows/update-configs.yml)
+[GitHub Actions](https://github.com/Abdulhossein/All-in-One/actions/workflows/update-configs.yml)
 
 A curated, **automatically updated** collection of active V2Ray configuration links (VMess, VLess, Trojan, Shadowsocks, SOCKS).  
 The config list is refreshed monthly (or on-demand) using GitHub Actions – only alive servers are kept.
