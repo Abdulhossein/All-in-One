@@ -23,7 +23,7 @@ https://raw.githubusercontent.com/Abdulhossein/All-in-One/main/v2rays
 
 ## ✨ Features
 
-- ✅ **Auto‑updated** – New configs are added, dead ones are removed every month.
+- ✅ **Auto‑updated** – New configs are added, dead ones are removed every two days.
 - ✅ **Liveness tested** – Every config is tested via TCP connection before being included.
 - ✅ **Header preserved** – Profile title, update interval, and support URL remain intact.
 - ✅ **Multiple sources** – Aggregates from 3 default subscriptions + any you add.
