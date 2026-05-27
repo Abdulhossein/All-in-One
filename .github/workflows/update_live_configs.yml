@@ -3,8 +3,9 @@ name: Update Live V2Ray Configs
 on:
   workflow_dispatch:
   schedule:
-    # 03:00 Tehran time (UTC+3:30) => 23:30 UTC previous day
-    - cron: '30 23 * * *'
+    # Daily at 03:00 Asia/Tehran
+    - cron: '0 3 * * *'
+      timezone: 'Asia/Tehran'
 
 concurrency:
   group: update-live-v2ray
@@ -58,7 +59,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Auto-update live configs [skip ci]"
+          git commit -m "Auto-update live_v2ray [skip ci]"
 
           for i in 1 2 3; do
             if git push origin HEAD:main; then
