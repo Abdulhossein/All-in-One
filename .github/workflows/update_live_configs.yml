@@ -1,0 +1,76 @@
+name: Update Live V2Ray Configs
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:00 Tehran time (UTC+3:30) => 23:30 UTC previous day
+    - cron: '30 23 * * *'
+
+concurrency:
+  group: update-live-v2ray
+  cancel-in-progress: false
+
+jobs:
+  live-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests urllib3 pysocks
+
+      - name: Download Xray core
+        run: |
+          set -e
+          mkdir -p xray-bin
+          curl -L https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip -o xray.zip
+          unzip -o xray.zip -d xray-bin
+          chmod +x xray-bin/xray
+          ls -la xray-bin
+
+      - name: Run live config checker
+        run: python live_config_updater.py
+
+      - name: Commit and push live_v2ray
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add live_v2ray
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Auto-update live configs [skip ci]"
+
+          for i in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Push successful"
+              exit 0
+            fi
+
+            echo "Push attempt $i failed, retrying after 5 seconds..."
+            sleep 5
+            git fetch origin main
+            git rebase origin/main || git rebase --abort
+          done
+
+          echo "Failed to push after 3 attempts"
+          exit 1
