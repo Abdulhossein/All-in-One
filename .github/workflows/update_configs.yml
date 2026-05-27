@@ -1,3 +1,4 @@
+
 name: Update Configs
 
 on:
@@ -8,11 +9,8 @@ on:
         required: false
         type: string
   schedule:
+    # هر ۲ روز یکبار، ساعت 00:00 UTC
     - cron: '0 0 */2 * *'
-
-concurrency:
-  group: update-configs
-  cancel-in-progress: false
 
 jobs:
   update:
@@ -23,8 +21,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,42 +32,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests urllib3
 
-      - name: Add new subscription links
-        if: github.event_name == 'workflow_dispatch' && inputs.new_subs != ''
+      - name: Add new subscription links (if provided)
+        if: github.event_name == 'workflow_dispatch' && inputs.new_subs
         run: |
-          printf '%s
-' "${{ inputs.new_subs }}" | tr ',' '
-' | sed '/^[[:space:]]*$/d' >> subscriptions.txt
+          echo "${{ inputs.new_subs }}" | tr ',' '\n' >> subscriptions.txt
 
       - name: Run config updater
         run: python config_updater.py
 
       - name: Commit and push changes
         run: |
-          set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add v2rays subscriptions.txt || true
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-
+          git add v2rays
+          if [ -f subscriptions.txt ]; then git add subscriptions.txt; fi
+          # اگر تغییری وجود ندارد، خارج شو
+          git diff --quiet && git diff --staged --quiet && exit 0
           git commit -m "Auto-update configs [skip ci]"
-
+          # تلاش برای pull --rebase و push (حداکثر ۳ بار)
           for i in 1 2 3; do
-            if git push origin HEAD:main; then
-              echo "Push successful"
-              exit 0
+            if git pull --rebase --strategy-option=theirs; then
+              if git push; then
+                echo "Push successful"
+                exit 0
+              fi
             fi
-            echo "Push attempt $i failed, retrying after 5 seconds..."
+            echo "Retry $i failed, waiting 5 seconds..."
             sleep 5
-            git fetch origin main
-            git rebase origin/main || git rebase --abort
           done
-
           echo "Failed to push after 3 attempts"
           exit 1
