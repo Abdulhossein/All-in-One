@@ -1,2 +1,3 @@
+https://raw.githubusercontent.com/Abdulhossein/All-in-One/main/v2rays#My%20v2ray%20Collection
 https://raw.githubusercontent.com/sinavm/SVM/refs/heads/main/subscriptions/xray/normal/vless#SiNAVM%20%7C%20VLESS
 https://raw.githubusercontent.com/hiddify/hiddify-app/refs/heads/main/test.configs/warp#Warp%20&%20Psiphon
