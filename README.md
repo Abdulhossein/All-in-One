@@ -1,6 +1,4 @@
-Here's a complete README.md file for your repository. It includes your subscription link, explains the auto-update feature, and provides instructions for users.
 
-```markdown
 # All-in-One V2Ray Config Collection
 
 ![GitHub Actions](https://github.com/Abdulhossein/All-in-One/actions/workflows/update-configs.yml/badge.svg)
@@ -15,7 +13,6 @@ The config list is refreshed monthly (or on-demand) using GitHub Actions – onl
 Add this URL to your V2Ray client (e.g., V2RayNG, NekoBox, Streisand, ClashMeta):
 
 ```
-
 https://raw.githubusercontent.com/Abdulhossein/All-in-One/main/v2rays
 
 ```
