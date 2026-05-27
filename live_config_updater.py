@@ -3,13 +3,12 @@ import json
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
 import time
 from typing import Dict, List, Optional, Set, Tuple
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -21,10 +20,12 @@ from urllib3.util.retry import Retry
 OUTPUT_FILE = "live_v2ray"
 SUBS_FILE = "subscriptions.txt"
 XRAY_BIN = os.path.join("xray-bin", "xray")
-XRAY_TIMEOUT = 12
-HTTP_TEST_TIMEOUT = 8
-START_PORT = 2080
+
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+HTTP_TEST_TIMEOUT = 8
+PROCESS_START_WAIT = 1.8
+TCP_TEST_TIMEOUT = 3.0
+START_PORT = 2080
 
 HEADER_LINES = [
     "#profile-title: base64:TXkgdjJyYXkgTGl2ZSBDb2xsZWN0aW9u",
@@ -42,13 +43,14 @@ DEFAULT_LINKS = [
 
 VALID_SCHEMES = ("vmess://", "vless://", "trojan://", "ss://", "socks://")
 SUB_LINK_PATTERN = r'(https?://[^\s"\']+sub_\d+\.txt[^\s"\']*)'
+
 TEST_URLS = [
     "http://cp.cloudflare.com/generate_204",
     "https://www.gstatic.com/generate_204",
 ]
 
 # =========================
-# HTTP session
+# Network session
 # =========================
 def create_session_with_retries(retries: int = 3, backoff_factor: float = 0.5) -> requests.Session:
     session = requests.Session()
@@ -69,7 +71,7 @@ SESSION = create_session_with_retries()
 
 
 # =========================
-# Basic helpers
+# Helpers
 # =========================
 def clean_url(url: str) -> str:
     return url.split("#", 1)[0].strip()
@@ -81,23 +83,6 @@ def normalize_b64(text: str) -> str:
     if missing_padding:
         text += "=" * (4 - missing_padding)
     return text
-
-
-def is_proxy_line(line: str) -> bool:
-    return line.strip().startswith(VALID_SCHEMES)
-
-
-def sanitize_config_lines(lines: List[str]) -> List[str]:
-    cleaned = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            continue
-        if is_proxy_line(line):
-            cleaned.append(line)
-    return cleaned
 
 
 def try_b64decode(text: str) -> Optional[str]:
@@ -124,6 +109,23 @@ def try_b64decode(text: str) -> Optional[str]:
     return None
 
 
+def is_proxy_line(line: str) -> bool:
+    return line.strip().startswith(VALID_SCHEMES)
+
+
+def sanitize_config_lines(lines: List[str]) -> List[str]:
+    cleaned = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            continue
+        if is_proxy_line(line):
+            cleaned.append(line)
+    return cleaned
+
+
 def decode_possible_base64(text: str) -> List[str]:
     text = text.strip()
     if not text:
@@ -142,7 +144,11 @@ def decode_possible_base64(text: str) -> List[str]:
 
 def fetch_content(url: str) -> Optional[str]:
     try:
-        response = SESSION.get(url, timeout=20, headers={"User-Agent": USER_AGENT})
+        response = SESSION.get(
+            url,
+            timeout=20,
+            headers={"User-Agent": USER_AGENT},
+        )
         response.raise_for_status()
         return response.text
     except Exception as e:
@@ -219,6 +225,19 @@ def dedupe_keep_order(items: List[str]) -> List[str]:
     return result
 
 
+def parse_query(query: str) -> Dict[str, str]:
+    return dict(parse_qsl(query, keep_blank_values=True))
+
+
+def parse_alpn(value: str) -> List[str]:
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
+def parse_host_port(host_port: str) -> Tuple[str, int]:
+    host, port = host_port.rsplit(":", 1)
+    return host, int(port)
+
+
 # =========================
 # Fast TCP precheck
 # =========================
@@ -247,16 +266,13 @@ def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
             rest = rest.split("#", 1)[0].split("?", 1)[0]
 
             if "@" in rest:
-                host_port = rest.split("@", 1)[1]
-                host, port = host_port.rsplit(":", 1)
-                return host, int(port)
+                host, port = parse_host_port(rest.split("@", 1)[1])
+                return host, port
 
             decoded = try_b64decode(rest)
             if decoded and "@" in decoded:
-                host_port = decoded.split("@", 1)[1]
-                host_port = host_port.split("#", 1)[0].split("?", 1)[0]
-                host, port = host_port.rsplit(":", 1)
-                return host, int(port)
+                host, port = parse_host_port(decoded.split("@", 1)[1])
+                return host, port
 
     except Exception as e:
         print(f"Parse error: {e}")
@@ -264,7 +280,7 @@ def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
     return None
 
 
-def tcp_ping(config: str, timeout: float = 3.0) -> Optional[float]:
+def tcp_ping(config: str, timeout: float = TCP_TEST_TIMEOUT) -> Optional[float]:
     server = parse_server_from_config(config)
     if not server:
         return None
@@ -280,323 +296,288 @@ def tcp_ping(config: str, timeout: float = 3.0) -> Optional[float]:
 
 
 # =========================
-# Xray real test
+# Xray outbound builders
 # =========================
-def find_free_port(start_port: int = START_PORT) -> int:
-    port = start_port
-    while port < start_port + 2000:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            if sock.connect_ex(("127.0.0.1", port)) != 0:
-                return port
-        port += 1
-    raise RuntimeError("No free port found")
+def parse_vmess_outbound(raw_config: str) -> Optional[Dict]:
+    payload = raw_config[len("vmess://"):]
+    decoded = try_b64decode(payload)
+    if not decoded:
+        return None
 
+    data = json.loads(decoded)
 
-def build_xray_config(raw_config: str, socks_port: int) -> Dict:
-    outbound = None
+    network = data.get("net", "tcp")
+    tls_mode = data.get("tls", "")
+    path = data.get("path", "") or "/"
+    host_header = data.get("host", "")
+    sni = data.get("sni", "")
+    alpn = data.get("alpn", "")
 
-    if raw_config.startswith("vmess://"):
-        outbound = {
-            "protocol": "vmess",
-            "settings": {
-                "vnext": []
-            },
-            "streamSettings": {}
-        }
-    elif raw_config.startswith("vless://"):
-        outbound = {
-            "protocol": "vless",
-            "settings": {
-                "vnext": []
-            },
-            "streamSettings": {}
-        }
-    elif raw_config.startswith("trojan://"):
-        outbound = {
-            "protocol": "trojan",
-            "settings": {
-                "servers": []
-            },
-            "streamSettings": {}
-        }
-    elif raw_config.startswith("ss://"):
-        outbound = {
-            "protocol": "shadowsocks",
-            "settings": {
-                "servers": []
-            },
-            "streamSettings": {}
-        }
-    elif raw_config.startswith("socks://"):
-        outbound = {
-            "protocol": "socks",
-            "settings": {
-                "servers": []
-            },
-            "streamSettings": {}
-        }
+    stream_settings: Dict = {
+        "network": network
+    }
+
+    if tls_mode == "tls":
+        stream_settings["security"] = "tls"
+        stream_settings["tlsSettings"] = {}
+        if sni:
+            stream_settings["tlsSettings"]["serverName"] = sni
+        if alpn:
+            stream_settings["tlsSettings"]["alpn"] = parse_alpn(alpn)
     else:
-        raise ValueError("Unsupported protocol")
+        stream_settings["security"] = "none"
+
+    if network == "ws":
+        stream_settings["wsSettings"] = {
+            "path": path,
+            "headers": {}
+        }
+        if host_header:
+            stream_settings["wsSettings"]["headers"]["Host"] = host_header
+
+    if network == "grpc":
+        stream_settings["grpcSettings"] = {
+            "serviceName": data.get("path", "")
+        }
+
+    outbound = {
+        "protocol": "vmess",
+        "settings": {
+            "vnext": [
+                {
+                    "address": data["add"],
+                    "port": int(data["port"]),
+                    "users": [
+                        {
+                            "id": data["id"],
+                            "alterId": int(data.get("aid", 0)),
+                            "security": data.get("scy", "auto"),
+                            "level": 0
+                        }
+                    ]
+                }
+            ]
+        },
+        "streamSettings": stream_settings
+    }
+
+    return outbound
+
+
+def parse_vless_outbound(raw_config: str) -> Optional[Dict]:
+    parsed = urlparse(raw_config)
+    query = parse_query(parsed.query)
+
+    stream_settings: Dict = {
+        "network": query.get("type", "tcp"),
+        "security": query.get("security", "none")
+    }
+
+    if query.get("security") == "tls":
+        stream_settings["tlsSettings"] = {}
+        if query.get("sni"):
+            stream_settings["tlsSettings"]["serverName"] = query["sni"]
+        if query.get("alpn"):
+            stream_settings["tlsSettings"]["alpn"] = parse_alpn(query["alpn"])
+        if query.get("fp"):
+            stream_settings["tlsSettings"]["fingerprint"] = query["fp"]
+
+    if query.get("security") == "reality":
+        stream_settings["realitySettings"] = {
+            "serverName": query.get("sni", ""),
+            "publicKey": query.get("pbk", ""),
+            "shortId": query.get("sid", ""),
+            "fingerprint": query.get("fp", "chrome"),
+            "spiderX": query.get("spx", "")
+        }
+
+    if query.get("type") == "ws":
+        stream_settings["wsSettings"] = {
+            "path": query.get("path", "/"),
+            "headers": {}
+        }
+        if query.get("host"):
+            stream_settings["wsSettings"]["headers"]["Host"] = query["host"]
+
+    if query.get("type") == "grpc":
+        stream_settings["grpcSettings"] = {
+            "serviceName": query.get("serviceName", "")
+        }
+
+    if query.get("type") == "httpupgrade":
+        stream_settings["httpupgradeSettings"] = {
+            "path": query.get("path", "/"),
+            "host": query.get("host", "")
+        }
 
     return {
-        "log": {
-            "loglevel": "warning"
-        },
-        "inbounds": [
-            {
-                "tag": "socks-in",
-                "listen": "127.0.0.1",
-                "port": socks_port,
-                "protocol": "socks",
-                "settings": {
-                    "udp": False
+        "protocol": "vless",
+        "settings": {
+            "vnext": [
+                {
+                    "address": parsed.hostname,
+                    "port": parsed.port,
+                    "users": [
+                        {
+                            "id": parsed.username,
+                            "encryption": query.get("encryption", "none"),
+                            "flow": query.get("flow", ""),
+                            "level": 0
+                        }
+                    ]
                 }
-            }
-        ],
-        "outbounds": [
-            outbound,
+            ]
+        },
+        "streamSettings": stream_settings
+    }
+
+
+def parse_trojan_outbound(raw_config: str) -> Optional[Dict]:
+    parsed = urlparse(raw_config)
+    query = parse_query(parsed.query)
+
+    stream_settings: Dict = {
+        "network": query.get("type", "tcp"),
+        "security": query.get("security", "tls")
+    }
+
+    if query.get("security", "tls") == "tls":
+        stream_settings["tlsSettings"] = {}
+        if query.get("sni"):
+            stream_settings["tlsSettings"]["serverName"] = query["sni"]
+        if query.get("alpn"):
+            stream_settings["tlsSettings"]["alpn"] = parse_alpn(query["alpn"])
+        if query.get("fp"):
+            stream_settings["tlsSettings"]["fingerprint"] = query["fp"]
+
+    if query.get("type") == "ws":
+        stream_settings["wsSettings"] = {
+            "path": query.get("path", "/"),
+            "headers": {}
+        }
+        if query.get("host"):
+            stream_settings["wsSettings"]["headers"]["Host"] = query["host"]
+
+    if query.get("type") == "grpc":
+        stream_settings["grpcSettings"] = {
+            "serviceName": query.get("serviceName", "")
+        }
+
+    if query.get("type") == "httpupgrade":
+        stream_settings["httpupgradeSettings"] = {
+            "path": query.get("path", "/"),
+            "host": query.get("host", "")
+        }
+
+    return {
+        "protocol": "trojan",
+        "settings": {
+            "servers": [
+                {
+                    "address": parsed.hostname,
+                    "port": parsed.port,
+                    "password": parsed.username,
+                    "level": 0
+                }
+            ]
+        },
+        "streamSettings": stream_settings
+    }
+
+
+def parse_ss_outbound(raw_config: str) -> Optional[Dict]:
+    rest = raw_config[len("ss://"):]
+    rest = rest.split("#", 1)[0]
+
+    plugin_query = ""
+    if "?" in rest:
+        rest, plugin_query = rest.split("?", 1)
+
+    if "@" in rest:
+        creds, host_port = rest.split("@", 1)
+    else:
+        decoded = try_b64decode(rest)
+        if not decoded or "@" not in decoded:
+            return None
+        creds, host_port = decoded.split("@", 1)
+
+    method, password = creds.split(":", 1)
+    host, port = parse_host_port(host_port)
+
+    server = {
+        "address": host,
+        "port": int(port),
+        "method": method,
+        "password": password,
+        "level": 0
+    }
+
+    if plugin_query:
+        plugin_params = parse_query(plugin_query)
+        if plugin_params.get("plugin"):
+            server["plugin"] = plugin_params["plugin"]
+        if plugin_params.get("plugin-opts"):
+            server["pluginOpts"] = plugin_params["plugin-opts"]
+
+    return {
+        "protocol": "shadowsocks",
+        "settings": {
+            "servers": [server]
+        }
+    }
+
+
+def parse_socks_outbound(raw_config: str) -> Optional[Dict]:
+    parsed = urlparse(raw_config)
+
+    server: Dict = {
+        "address": parsed.hostname,
+        "port": parsed.port
+    }
+
+    if parsed.username or parsed.password:
+        server["users"] = [
             {
-                "tag": "direct",
-                "protocol": "freedom",
-                "settings": {}
+                "user": parsed.username or "",
+                "pass": parsed.password or ""
             }
         ]
+
+    return {
+        "protocol": "socks",
+        "settings": {
+            "servers": [server]
+        }
     }
 
 
 def parse_to_xray_outbound(raw_config: str) -> Optional[Dict]:
     try:
         if raw_config.startswith("vmess://"):
-            payload = raw_config[len("vmess://"):]
-            decoded = try_b64decode(payload)
-            if not decoded:
-                return None
-            data = json.loads(decoded)
-
-            network = data.get("net", "tcp")
-            security = data.get("tls", "")
-            path = data.get("path", "")
-            host_header = data.get("host", "")
-            sni = data.get("sni", "")
-            alpn = data.get("alpn", "")
-
-            outbound = {
-                "protocol": "vmess",
-                "settings": {
-                    "vnext": [
-                        {
-                            "address": data["add"],
-                            "port": int(data["port"]),
-                            "users": [
-                                {
-                                    "id": data["id"],
-                                    "alterId": int(data.get("aid", 0)),
-                                    "security": data.get("scy", "auto"),
-                                    "level": 0
-                                }
-                            ]
-                        }
-                    ]
-                },
-                "streamSettings": {
-                    "network": network
-                }
-            }
-
-            if security == "tls":
-                outbound["streamSettings"]["security"] = "tls"
-                outbound["streamSettings"]["tlsSettings"] = {}
-                if sni:
-                    outbound["streamSettings"]["tlsSettings"]["serverName"] = sni
-                if alpn:
-                    outbound["streamSettings"]["tlsSettings"]["alpn"] = alpn.split(",")
-
-            if network == "ws":
-                outbound["streamSettings"]["wsSettings"] = {
-                    "path": path or "/",
-                    "headers": {}
-                }
-                if host_header:
-                    outbound["streamSettings"]["wsSettings"]["headers"]["Host"] = host_header
-
-            return outbound
-
+            return parse_vmess_outbound(raw_config)
         if raw_config.startswith("vless://"):
-            parsed = urlparse(raw_config)
-            query = dict(
-                item.split("=", 1) for item in parsed.query.split("&") if "=" in item
-            )
-
-            outbound = {
-                "protocol": "vless",
-                "settings": {
-                    "vnext": [
-                        {
-                            "address": parsed.hostname,
-                            "port": parsed.port,
-                            "users": [
-                                {
-                                    "id": parsed.username,
-                                    "encryption": query.get("encryption", "none"),
-                                    "flow": query.get("flow", "")
-                                }
-                            ]
-                        }
-                    ]
-                },
-                "streamSettings": {
-                    "network": query.get("type", "tcp"),
-                    "security": query.get("security", "none")
-                }
-            }
-
-            if query.get("security") == "tls":
-                outbound["streamSettings"]["tlsSettings"] = {}
-                if query.get("sni"):
-                    outbound["streamSettings"]["tlsSettings"]["serverName"] = query["sni"]
-                if query.get("alpn"):
-                    outbound["streamSettings"]["tlsSettings"]["alpn"] = query["alpn"].split(",")
-
-            if query.get("type") == "ws":
-                outbound["streamSettings"]["wsSettings"] = {
-                    "path": query.get("path", "/"),
-                    "headers": {}
-                }
-                if query.get("host"):
-                    outbound["streamSettings"]["wsSettings"]["headers"]["Host"] = query["host"]
-
-            if query.get("type") == "grpc":
-                outbound["streamSettings"]["grpcSettings"] = {
-                    "serviceName": query.get("serviceName", "")
-                }
-
-            if query.get("security") == "reality":
-                outbound["streamSettings"]["realitySettings"] = {
-                    "serverName": query.get("sni", ""),
-                    "publicKey": query.get("pbk", ""),
-                    "shortId": query.get("sid", ""),
-                    "fingerprint": query.get("fp", "chrome"),
-                    "spiderX": query.get("spx", "")
-                }
-
-            return outbound
-
+            return parse_vless_outbound(raw_config)
         if raw_config.startswith("trojan://"):
-            parsed = urlparse(raw_config)
-            query = dict(
-                item.split("=", 1) for item in parsed.query.split("&") if "=" in item
-            )
-
-            outbound = {
-                "protocol": "trojan",
-                "settings": {
-                    "servers": [
-                        {
-                            "address": parsed.hostname,
-                            "port": parsed.port,
-                            "password": parsed.username,
-                            "level": 0
-                        }
-                    ]
-                },
-                "streamSettings": {
-                    "network": query.get("type", "tcp"),
-                    "security": query.get("security", "tls")
-                }
-            }
-
-            if query.get("security", "tls") == "tls":
-                outbound["streamSettings"]["tlsSettings"] = {}
-                if query.get("sni"):
-                    outbound["streamSettings"]["tlsSettings"]["serverName"] = query["sni"]
-                if query.get("alpn"):
-                    outbound["streamSettings"]["tlsSettings"]["alpn"] = query["alpn"].split(",")
-
-            if query.get("type") == "ws":
-                outbound["streamSettings"]["wsSettings"] = {
-                    "path": query.get("path", "/"),
-                    "headers": {}
-                }
-                if query.get("host"):
-                    outbound["streamSettings"]["wsSettings"]["headers"]["Host"] = query["host"]
-
-            if query.get("type") == "grpc":
-                outbound["streamSettings"]["grpcSettings"] = {
-                    "serviceName": query.get("serviceName", "")
-                }
-
-            return outbound
-
+            return parse_trojan_outbound(raw_config)
         if raw_config.startswith("ss://"):
-            rest = raw_config[len("ss://"):]
-            rest = rest.split("#", 1)[0]
-            plugin_part = ""
-            if "?" in rest:
-                rest, plugin_part = rest.split("?", 1)
-
-            decoded = None
-            if "@" not in rest:
-                decoded = try_b64decode(rest)
-                if not decoded:
-                    return None
-                rest = decoded
-
-            creds, host_port = rest.split("@", 1)
-            method, password = creds.split(":", 1)
-            host, port = host_port.rsplit(":", 1)
-
-            server = {
-                "address": host,
-                "port": int(port),
-                "method": method,
-                "password": password,
-                "level": 0
-            }
-
-            outbound = {
-                "protocol": "shadowsocks",
-                "settings": {
-                    "servers": [server]
-                }
-            }
-
-            if plugin_part:
-                params = dict(
-                    item.split("=", 1) for item in plugin_part.split("&") if "=" in item
-                )
-                plugin = params.get("plugin", "")
-                if plugin:
-                    server["plugin"] = plugin
-                    if "plugin-opts" in params:
-                        server["pluginOpts"] = params["plugin-opts"]
-
-            return outbound
-
+            return parse_ss_outbound(raw_config)
         if raw_config.startswith("socks://"):
-            parsed = urlparse(raw_config)
-            return {
-                "protocol": "socks",
-                "settings": {
-                    "servers": [
-                        {
-                            "address": parsed.hostname,
-                            "port": parsed.port,
-                            "users": [
-                                {
-                                    "user": parsed.username or "",
-                                    "pass": parsed.password or ""
-                                }
-                            ] if parsed.username or parsed.password else []
-                        }
-                    ]
-                }
-            }
-
+            return parse_socks_outbound(raw_config)
     except Exception as e:
         print(f"Failed to convert config to Xray outbound: {e}")
         return None
-
     return None
+
+
+# =========================
+# Xray live test
+# =========================
+def find_free_port(start_port: int = START_PORT) -> int:
+    for port in range(start_port, start_port + 2000):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    raise RuntimeError("No free port found")
 
 
 def run_xray_and_measure(raw_config: str) -> Optional[float]:
@@ -605,6 +586,7 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
         return None
 
     socks_port = find_free_port()
+
     config_data = {
         "log": {"loglevel": "warning"},
         "inbounds": [
@@ -635,6 +617,7 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
 
     temp_dir = tempfile.mkdtemp(prefix="xray_live_")
     config_path = os.path.join(temp_dir, "config.json")
+
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config_data, f, ensure_ascii=False)
 
@@ -646,7 +629,7 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
             stderr=subprocess.DEVNULL,
         )
 
-        time.sleep(1.8)
+        time.sleep(PROCESS_START_WAIT)
 
         proxies = {
             "http": f"socks5h://127.0.0.1:{socks_port}",
@@ -654,6 +637,7 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
         }
 
         best_delay = None
+
         for test_url in TEST_URLS:
             start = time.perf_counter()
             try:
@@ -676,6 +660,7 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
     except Exception as e:
         print(f"Xray execution failed: {e}")
         return None
+
     finally:
         if proc and proc.poll() is None:
             try:
@@ -690,7 +675,7 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
 
 
 # =========================
-# Save output
+# Output
 # =========================
 def save_configs(real_working: List[str], tcp_alive_only: List[str]) -> None:
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -712,7 +697,7 @@ def main() -> None:
     links = gather_all_subscription_links()
     print(f"Total subscription links: {len(links)}")
 
-    raw_configs = []
+    raw_configs: List[str] = []
     for link in links:
         print(f"Fetching configs from: {link}")
         raw_configs.extend(gather_configs_from_link(link))
