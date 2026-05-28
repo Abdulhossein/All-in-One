@@ -8,7 +8,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: '0 */10 * * *'   # هر ۳ ساعت
+    - cron: '0 0 */2 * *'   # هر ۳ ساعت
 
 # از اجرای هم‌زمان جلوگیری کن (فقط یک job فعال باشد)
 concurrency:
