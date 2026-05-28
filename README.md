@@ -13,7 +13,7 @@ https://raw.githubusercontent.com/Abdulhossein/All-in-One/main/v2rays
 
 ```
 ```
-https://raw.githubusercontent.com/Abdulhossein/All-in-One/main/v2rays
+https://raw.githubusercontent.com/Abdulhossein/All-in-One/main/live_v2rays
 ```
 
 That's it – your client will automatically fetch the latest working servers.
