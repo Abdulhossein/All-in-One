@@ -3,7 +3,6 @@ name: Update Live V2Ray Configs
 on:
   workflow_dispatch:
   schedule:
-    # هر ۷ ساعت یکبار اجرا می‌شود (6 بار در روز)
     - cron: '0 */7 * * *'
       timezone: 'Asia/Tehran'
 
@@ -44,12 +43,12 @@ jobs:
       - name: Run live config checker
         run: python live_config_updater.py
 
-      - name: Commit and push live_v2ray
+      - name: Commit and push changes
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add live_v2ray
+          git add live_v2ray state.json
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
