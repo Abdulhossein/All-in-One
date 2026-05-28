@@ -8,7 +8,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: '0 */6 * * *' 
+    - cron: '0 */3 * * *'   # هر ۳ ساعت
 
 jobs:
   update:
@@ -31,12 +31,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests urllib3
 
-      - name: Add new subscription links
+      - name: Add new subscription links (manual)
         if: github.event_name == 'workflow_dispatch' && inputs.new_subs != ''
         env:
           NEW_SUBS: ${{ inputs.new_subs }}
         run: |
-          mkdir -p tools/config-update/runtime
           printf '%s\n' "$NEW_SUBS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' >> subscriptions.txt
 
       - name: Run config updater
@@ -48,15 +47,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # فقط فایل‌هایی که باید commit شوند
-          git add v2rays subscriptions.txt tools/config-update/runtime/update_state.json tools/config-update/runtime/v2rays.next || true
+          git add v2rays subscriptions.txt tools/config-update/runtime/ || true
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
 
-          git commit -m "Auto-update configs batch progress [skip ci]"
+          git commit -m "Auto-update configs [skip ci]"
 
           for i in 1 2 3; do
             if git push origin HEAD:main; then
