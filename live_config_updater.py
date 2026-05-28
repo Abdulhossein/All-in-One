@@ -8,8 +8,9 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, unquote, urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -29,7 +30,8 @@ TCP_TEST_TIMEOUT = 3.0
 START_PORT = 2080
 MAX_WORKERS = 10
 BATCH_SIZE = 200
-MAX_RUNTIME_SECONDS = 55 * 60  # 55 minutes
+MAX_RUNTIME_SECONDS = 55 * 60          # 55 minutes
+RESET_AFTER_DAYS = 10                  # 10-day reset window
 
 HEADER_LINES = [
     "#profile-title: base64:TXkgdjJyYXkgTGl2ZSBDb2xsZWN0aW9u",
@@ -507,7 +509,7 @@ def save_state(state: dict):
         json.dump(state, f)
 
 def initialize_state() -> dict:
-    """Fetch all configs from source and initialize state."""
+    """Fetch all configs from source and initialize state with reset timestamp."""
     print("Fetching all configs from source...")
     configs = gather_configs_from_source(SOURCE_URL)
     configs = dedupe_keep_order(configs)
@@ -517,10 +519,34 @@ def initialize_state() -> dict:
         "last_index": -1,
         "batch_size": BATCH_SIZE,
         "finished": False,
-        "active_added_total": 0
+        "active_added_total": 0,
+        "last_reset": datetime.now(timezone.utc).isoformat()
     }
     save_state(state)
     return state
+
+def should_reset(state: dict) -> bool:
+    """
+    Determine if a full reset is needed.
+    Conditions:
+      - State is empty (first run)
+      - State says finished
+      - Last reset was more than RESET_AFTER_DAYS days ago
+    """
+    if not state:
+        return True
+    if state.get("finished", False):
+        return True
+    last_reset_str = state.get("last_reset")
+    if last_reset_str:
+        try:
+            last_reset = datetime.fromisoformat(last_reset_str)
+            now = datetime.now(timezone.utc)
+            if now - last_reset > timedelta(days=RESET_AFTER_DAYS):
+                return True
+        except Exception:
+            return True   # if parsing fails, better reset
+    return False
 
 # =========================
 # Output file handling
@@ -546,14 +572,20 @@ def main():
         raise FileNotFoundError(f"Xray binary not found: {XRAY_BIN}")
 
     start_time = time.time()
-    ensure_header()
 
-    # Load or initialize state
+    # Load state
     state = load_state()
-    if not state:
+
+    # Check if reset is required
+    if should_reset(state):
+        print("Reset condition met. Clearing output file and starting fresh.")
+        # Delete output file to start clean
+        if os.path.exists(OUTPUT_FILE):
+            os.remove(OUTPUT_FILE)
+        # Initialize new state
         state = initialize_state()
-    else:
-        print(f"Resuming from state: last_index={state['last_index']}")
+
+    ensure_header()   # ensures header is written if file missing/empty
 
     all_configs = state['all_configs']
     last_index = state['last_index']
@@ -561,8 +593,16 @@ def main():
     finished = state.get('finished', False)
 
     if finished:
-        print("All configs have been processed in previous runs. Exiting.")
-        return
+        # Should not happen because reset would have triggered, but just in case
+        print("State marked finished; resetting anyway.")
+        if os.path.exists(OUTPUT_FILE):
+            os.remove(OUTPUT_FILE)
+        state = initialize_state()
+        ensure_header()
+        # re-read values
+        all_configs = state['all_configs']
+        last_index = state['last_index']
+        batch_size = state['batch_size']
 
     start_idx = last_index + 1
     remaining_configs = all_configs[start_idx:]
@@ -575,7 +615,6 @@ def main():
         return
 
     active_added_this_run = 0
-    newly_active = []
 
     for i, cfg in enumerate(remaining_configs, start=start_idx):
         # Check time limit
@@ -593,12 +632,10 @@ def main():
         real_delay = run_xray_and_measure(cfg)
         if real_delay is not None:
             print(f"Active config found: {cfg[:60]}...")
-            newly_active.append(cfg)
+            append_configs([cfg])
             active_added_this_run += 1
             state['active_added_total'] = state.get('active_added_total', 0) + 1
-            # Append to output file immediately
-            append_configs([cfg])
-            # Check batch limit for this run
+
             if active_added_this_run >= batch_size:
                 print(f"Reached batch limit of {batch_size} active configs. Stopping.")
                 state['last_index'] = i
@@ -606,17 +643,18 @@ def main():
                 return
 
         state['last_index'] = i
-        # Save state periodically
+        # Periodic state save every 50 tested configs
         if i % 50 == 0:
             save_state(state)
             print(f"Progress: {i - start_idx + 1}/{len(remaining_configs)} tested, active this run: {active_added_this_run}")
 
-    # If loop finishes naturally, mark as finished
+    # If loop finishes naturally (all configs tested)
     if state['last_index'] >= len(all_configs) - 1:
         state['finished'] = True
-        print("All configs processed.")
+        print("All configs processed. Next run will reset automatically.")
+
     save_state(state)
-    print(f"Run complete. Active configs added this run: {len(newly_active)}")
+    print(f"Run complete. Active configs added this run: {active_added_this_run}")
 
 if __name__ == "__main__":
     main()
