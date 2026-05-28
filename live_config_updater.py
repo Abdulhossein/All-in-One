@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, unquote, urljoin, urlparse
 
 import requests
@@ -19,15 +19,17 @@ from urllib3.util.retry import Retry
 # Configuration
 # =========================
 OUTPUT_FILE = "live_v2ray"
-SUBS_FILE = "subscriptions.txt"
+STATE_FILE = "state.json"
+SOURCE_URL = "https://raw.githubusercontent.com/Abdulhossein/All-in-One/main/v2rays"
 XRAY_BIN = os.path.join("xray-bin", "xray")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HTTP_TEST_TIMEOUT = 8
 PROCESS_START_WAIT = 1.8
 TCP_TEST_TIMEOUT = 3.0
 START_PORT = 2080
-MAX_WORKERS = 10  # تعداد نخ‌های موازی برای تست TCP
-BATCH_SIZE = 200  # ذخیره‌سازی مرحله‌ای هر ۲۰۰ کانفیگ فعال
+MAX_WORKERS = 10
+BATCH_SIZE = 200
+MAX_RUNTIME_SECONDS = 55 * 60  # 55 minutes
 
 HEADER_LINES = [
     "#profile-title: base64:TXkgdjJyYXkgTGl2ZSBDb2xsZWN0aW9u",
@@ -37,14 +39,7 @@ HEADER_LINES = [
     "#profile-web-page-url: https://github.com/Abdulhossein/All-in-One/edit/main/live_v2ray"
 ]
 
-DEFAULT_LINKS = [
-    "https://raw.githubusercontent.com/hiddify/hiddify-app/refs/heads/main/test.configs/mahsa#Mahsa",
-    "https://raw.githubusercontent.com/4n0nymou3/multi-proxy-config-fetcher/refs/heads/main/configs/proxy_configs.txt#Anonymous",
-    "https://raw.githubusercontent.com/hiddify/hiddify-app/refs/heads/main/test.configs/warp#Warp%20&%20Psiphon"
-]
-
 VALID_SCHEMES = ("vmess://", "vless://", "trojan://", "ss://", "socks://")
-SUB_LINK_PATTERN = r'(https?://[^\s"\']+sub_\d+\.txt[^\s"\']*)'
 TEST_URLS = [
     "http://cp.cloudflare.com/generate_204",
     "https://www.gstatic.com/generate_204",
@@ -70,7 +65,7 @@ def create_session_with_retries(retries: int = 3, backoff_factor: float = 0.5) -
 SESSION = create_session_with_retries()
 
 # =========================
-# Helpers (دست‌نخورده باقی مانده‌اند)
+# Helpers
 # =========================
 def clean_url(url: str) -> str:
     return url.split("#", 1)[0].strip()
@@ -143,52 +138,11 @@ def fetch_content(url: str) -> Optional[str]:
         print(f"Error fetching {url}: {e}")
         return None
 
-def extract_sub_links_from_yaml(content: str, base_url: str) -> List[str]:
-    found = re.findall(SUB_LINK_PATTERN, content)
-    if found:
-        return sorted(set(found))
-    sub_names = re.findall(r"sub_(\d+)\.txt", content)
-    return [urljoin(base_url, f"sub_{n}.txt") for n in sorted(set(sub_names), key=int)]
-
-def load_subscription_links(subs_file: str) -> List[str]:
-    links = []
-    seen = set()
-    try:
-        with open(subs_file, "r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                normalized = clean_url(line)
-                if normalized and normalized not in seen:
-                    seen.add(normalized)
-                    links.append(normalized)
-    except FileNotFoundError:
-        pass
-    return links
-
-def gather_all_subscription_links() -> List[str]:
-    all_links = []
-    seen = set()
-    for link in DEFAULT_LINKS + load_subscription_links(SUBS_FILE):
-        normalized = clean_url(link)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            all_links.append(normalized)
-    return all_links
-
-def gather_configs_from_link(link: str) -> List[str]:
-    content = fetch_content(link)
+def gather_configs_from_source(url: str) -> List[str]:
+    """Fetch and decode all configs from a single source URL."""
+    content = fetch_content(url)
     if not content:
         return []
-    if re.search(r"sub_\d+\.txt", content, re.IGNORECASE):
-        all_configs = []
-        for sub_link in extract_sub_links_from_yaml(content, link):
-            sub_content = fetch_content(sub_link)
-            if not sub_content:
-                continue
-            all_configs.extend(decode_possible_base64(sub_content))
-        return all_configs
     return decode_possible_base64(content)
 
 def dedupe_keep_order(items: List[str]) -> List[str]:
@@ -211,7 +165,7 @@ def parse_host_port(host_port: str) -> Tuple[str, int]:
     return host, int(port)
 
 # =========================
-# Fast TCP precheck (موازی‌سازی شده)
+# Fast TCP precheck
 # =========================
 def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
     try:
@@ -257,27 +211,8 @@ def tcp_ping(config: str, timeout: float = TCP_TEST_TIMEOUT) -> Optional[float]:
     except Exception:
         return None
 
-def parallel_tcp_filter(configs: List[str]) -> List[Tuple[str, float]]:
-    """
-    تست موازی TCP روی تمام کانفیگ‌ها.
-    تنها کانفیگ‌هایی که پاسخ دهند بازگردانده می‌شوند.
-    """
-    alive = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_config = {executor.submit(tcp_ping, cfg): cfg for cfg in configs}
-        for future in as_completed(future_to_config):
-            cfg = future_to_config[future]
-            try:
-                delay = future.result()
-                if delay is not None:
-                    alive.append((cfg, delay))
-            except Exception as e:
-                print(f"TCP test error for {cfg[:40]}...: {e}")
-    alive.sort(key=lambda x: x[1])
-    return alive
-
 # =========================
-# Xray outbound builders (دست‌نخورده باقی مانده‌اند)
+# Xray outbound builders
 # =========================
 def parse_vmess_outbound(raw_config: str) -> Optional[Dict]:
     payload = raw_config[len("vmess://"):]
@@ -291,9 +226,7 @@ def parse_vmess_outbound(raw_config: str) -> Optional[Dict]:
     host_header = data.get("host", "")
     sni = data.get("sni", "")
     alpn = data.get("alpn", "")
-    stream_settings: Dict = {
-        "network": network
-    }
+    stream_settings: Dict = {"network": network}
     if tls_mode == "tls":
         stream_settings["security"] = "tls"
         stream_settings["tlsSettings"] = {}
@@ -304,33 +237,24 @@ def parse_vmess_outbound(raw_config: str) -> Optional[Dict]:
     else:
         stream_settings["security"] = "none"
     if network == "ws":
-        stream_settings["wsSettings"] = {
-            "path": path,
-            "headers": {}
-        }
+        stream_settings["wsSettings"] = {"path": path, "headers": {}}
         if host_header:
             stream_settings["wsSettings"]["headers"]["Host"] = host_header
     if network == "grpc":
-        stream_settings["grpcSettings"] = {
-            "serviceName": data.get("path", "")
-        }
+        stream_settings["grpcSettings"] = {"serviceName": data.get("path", "")}
     outbound = {
         "protocol": "vmess",
         "settings": {
-            "vnext": [
-                {
-                    "address": data["add"],
-                    "port": int(data["port"]),
-                    "users": [
-                        {
-                            "id": data["id"],
-                            "alterId": int(data.get("aid", 0)),
-                            "security": data.get("scy", "auto"),
-                            "level": 0
-                        }
-                    ]
-                }
-            ]
+            "vnext": [{
+                "address": data["add"],
+                "port": int(data["port"]),
+                "users": [{
+                    "id": data["id"],
+                    "alterId": int(data.get("aid", 0)),
+                    "security": data.get("scy", "auto"),
+                    "level": 0
+                }]
+            }]
         },
         "streamSettings": stream_settings
     }
@@ -367,9 +291,7 @@ def parse_vless_outbound(raw_config: str) -> Optional[Dict]:
         if query.get("host"):
             stream_settings["wsSettings"]["headers"]["Host"] = query["host"]
     if query.get("type") == "grpc":
-        stream_settings["grpcSettings"] = {
-            "serviceName": query.get("serviceName", "")
-        }
+        stream_settings["grpcSettings"] = {"serviceName": query.get("serviceName", "")}
     if query.get("type") == "httpupgrade":
         stream_settings["httpupgradeSettings"] = {
             "path": query.get("path", "/"),
@@ -378,20 +300,16 @@ def parse_vless_outbound(raw_config: str) -> Optional[Dict]:
     return {
         "protocol": "vless",
         "settings": {
-            "vnext": [
-                {
-                    "address": parsed.hostname,
-                    "port": parsed.port,
-                    "users": [
-                        {
-                            "id": parsed.username,
-                            "encryption": query.get("encryption", "none"),
-                            "flow": query.get("flow", ""),
-                            "level": 0
-                        }
-                    ]
-                }
-            ]
+            "vnext": [{
+                "address": parsed.hostname,
+                "port": parsed.port,
+                "users": [{
+                    "id": parsed.username,
+                    "encryption": query.get("encryption", "none"),
+                    "flow": query.get("flow", ""),
+                    "level": 0
+                }]
+            }]
         },
         "streamSettings": stream_settings
     }
@@ -412,16 +330,11 @@ def parse_trojan_outbound(raw_config: str) -> Optional[Dict]:
         if query.get("fp"):
             stream_settings["tlsSettings"]["fingerprint"] = query["fp"]
     if query.get("type") == "ws":
-        stream_settings["wsSettings"] = {
-            "path": query.get("path", "/"),
-            "headers": {}
-        }
+        stream_settings["wsSettings"] = {"path": query.get("path", "/"), "headers": {}}
         if query.get("host"):
             stream_settings["wsSettings"]["headers"]["Host"] = query["host"]
     if query.get("type") == "grpc":
-        stream_settings["grpcSettings"] = {
-            "serviceName": query.get("serviceName", "")
-        }
+        stream_settings["grpcSettings"] = {"serviceName": query.get("serviceName", "")}
     if query.get("type") == "httpupgrade":
         stream_settings["httpupgradeSettings"] = {
             "path": query.get("path", "/"),
@@ -430,14 +343,12 @@ def parse_trojan_outbound(raw_config: str) -> Optional[Dict]:
     return {
         "protocol": "trojan",
         "settings": {
-            "servers": [
-                {
-                    "address": parsed.hostname,
-                    "port": parsed.port,
-                    "password": parsed.username,
-                    "level": 0
-                }
-            ]
+            "servers": [{
+                "address": parsed.hostname,
+                "port": parsed.port,
+                "password": parsed.username,
+                "level": 0
+            }]
         },
         "streamSettings": stream_settings
     }
@@ -470,32 +381,14 @@ def parse_ss_outbound(raw_config: str) -> Optional[Dict]:
             server["plugin"] = plugin_params["plugin"]
         if plugin_params.get("plugin-opts"):
             server["pluginOpts"] = plugin_params["plugin-opts"]
-    return {
-        "protocol": "shadowsocks",
-        "settings": {
-            "servers": [server]
-        }
-    }
+    return {"protocol": "shadowsocks", "settings": {"servers": [server]}}
 
 def parse_socks_outbound(raw_config: str) -> Optional[Dict]:
     parsed = urlparse(raw_config)
-    server: Dict = {
-        "address": parsed.hostname,
-        "port": parsed.port
-    }
+    server: Dict = {"address": parsed.hostname, "port": parsed.port}
     if parsed.username or parsed.password:
-        server["users"] = [
-            {
-                "user": parsed.username or "",
-                "pass": parsed.password or ""
-            }
-        ]
-    return {
-        "protocol": "socks",
-        "settings": {
-            "servers": [server]
-        }
-    }
+        server["users"] = [{"user": parsed.username or "", "pass": parsed.password or ""}]
+    return {"protocol": "socks", "settings": {"servers": [server]}}
 
 def parse_to_xray_outbound(raw_config: str) -> Optional[Dict]:
     try:
@@ -514,7 +407,7 @@ def parse_to_xray_outbound(raw_config: str) -> Optional[Dict]:
     return None
 
 # =========================
-# Xray live test (با مدیریت بهتر منابع)
+# Xray live test
 # =========================
 def find_free_port(start_port: int = START_PORT) -> int:
     for port in range(start_port, start_port + 2000):
@@ -530,15 +423,13 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
     socks_port = find_free_port()
     config_data = {
         "log": {"loglevel": "warning"},
-        "inbounds": [
-            {
-                "tag": "socks-in",
-                "listen": "127.0.0.1",
-                "port": socks_port,
-                "protocol": "socks",
-                "settings": {"udp": False}
-            }
-        ],
+        "inbounds": [{
+            "tag": "socks-in",
+            "listen": "127.0.0.1",
+            "port": socks_port,
+            "protocol": "socks",
+            "settings": {"udp": False}
+        }],
         "outbounds": [
             dict(outbound, tag="proxy"),
             {"tag": "direct", "protocol": "freedom", "settings": {}},
@@ -546,13 +437,11 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
         ],
         "routing": {
             "domainStrategy": "AsIs",
-            "rules": [
-                {
-                    "type": "field",
-                    "inboundTag": ["socks-in"],
-                    "outboundTag": "proxy"
-                }
-            ]
+            "rules": [{
+                "type": "field",
+                "inboundTag": ["socks-in"],
+                "outboundTag": "proxy"
+            }]
         }
     }
     temp_dir = tempfile.mkdtemp(prefix="xray_live_")
@@ -605,66 +494,129 @@ def run_xray_and_measure(raw_config: str) -> Optional[float]:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 # =========================
-# Output (بازنویسی کامل فایل)
+# State management
 # =========================
-def save_configs(real_working: List[str], tcp_alive_only: List[str]) -> None:
-    """
-    فایل خروجی را از ابتدا بازنویسی می‌کند (حالت 'w').
-    """
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for line in HEADER_LINES:
-            f.write(line + "\n")
-        for cfg in real_working:
-            f.write(cfg + "\n")
-        for cfg in tcp_alive_only:
-            f.write(cfg + "\n")
-    print(f"Saved {len(real_working)} real + {len(tcp_alive_only)} TCP configs to {OUTPUT_FILE}")
+def load_state() -> dict:
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_state(state: dict):
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f)
+
+def initialize_state() -> dict:
+    """Fetch all configs from source and initialize state."""
+    print("Fetching all configs from source...")
+    configs = gather_configs_from_source(SOURCE_URL)
+    configs = dedupe_keep_order(configs)
+    print(f"Total unique configs: {len(configs)}")
+    state = {
+        "all_configs": configs,
+        "last_index": -1,
+        "batch_size": BATCH_SIZE,
+        "finished": False,
+        "active_added_total": 0
+    }
+    save_state(state)
+    return state
 
 # =========================
-# Main (بازنویسی شده با قابلیت‌های جدید)
+# Output file handling
 # =========================
-def main() -> None:
+def ensure_header():
+    """Write header to output file if it doesn't exist or is empty."""
+    if not os.path.exists(OUTPUT_FILE) or os.path.getsize(OUTPUT_FILE) == 0:
+        with open(OUTPUT_FILE, 'w') as f:
+            for line in HEADER_LINES:
+                f.write(line + '\n')
+
+def append_configs(configs: List[str]):
+    """Append configs to output file."""
+    with open(OUTPUT_FILE, 'a') as f:
+        for cfg in configs:
+            f.write(cfg + '\n')
+
+# =========================
+# Main
+# =========================
+def main():
     if not os.path.isfile(XRAY_BIN):
         raise FileNotFoundError(f"Xray binary not found: {XRAY_BIN}")
 
-    # 1. جمع‌آوری لینک‌ها و کانفیگ‌ها
-    links = gather_all_subscription_links()
-    print(f"Total subscription links: {len(links)}")
+    start_time = time.time()
+    ensure_header()
 
-    raw_configs: List[str] = []
-    for link in links:
-        print(f"Fetching configs from: {link}")
-        raw_configs.extend(gather_configs_from_link(link))
+    # Load or initialize state
+    state = load_state()
+    if not state:
+        state = initialize_state()
+    else:
+        print(f"Resuming from state: last_index={state['last_index']}")
 
-    raw_configs = dedupe_keep_order(raw_configs)
-    print(f"Total unique configs collected: {len(raw_configs)}")
+    all_configs = state['all_configs']
+    last_index = state['last_index']
+    batch_size = state['batch_size']
+    finished = state.get('finished', False)
 
-    # 2. فیلتر سریع اولیه با تست TCP موازی
-    print("Running parallel TCP precheck...")
-    tcp_alive = parallel_tcp_filter(raw_configs)
-    print(f"TCP alive configs: {len(tcp_alive)}/{len(raw_configs)}")
+    if finished:
+        print("All configs have been processed in previous runs. Exiting.")
+        return
 
-    # 3. تست نهایی با Xray و ذخیره‌سازی مرحله‌ای
-    real_working = []
-    processed_count = 0
-    for idx, (cfg, tcp_delay) in enumerate(tcp_alive, start=1):
-        print(f"[{idx}/{len(tcp_alive)}] Testing config with Xray...")
+    start_idx = last_index + 1
+    remaining_configs = all_configs[start_idx:]
+    print(f"Configs remaining to test: {len(remaining_configs)}")
+
+    if not remaining_configs:
+        print("No more configs to process. Marking as finished.")
+        state['finished'] = True
+        save_state(state)
+        return
+
+    active_added_this_run = 0
+    newly_active = []
+
+    for i, cfg in enumerate(remaining_configs, start=start_idx):
+        # Check time limit
+        if time.time() - start_time > MAX_RUNTIME_SECONDS:
+            print("Time limit reached. Saving state and exiting.")
+            break
+
+        # TCP precheck
+        tcp_result = tcp_ping(cfg)
+        if tcp_result is None:
+            state['last_index'] = i
+            continue
+
+        # Xray test
         real_delay = run_xray_and_measure(cfg)
         if real_delay is not None:
-            print(f"  REAL OK: {real_delay} ms")
-            real_working.append(cfg)
-            processed_count += 1
-            # ذخیره‌سازی مرحله‌ای پس از هر ۲۰۰ کانفیگ فعال
-            if processed_count % BATCH_SIZE == 0:
-                print(f"Checkpoint: {processed_count} active configs found. Saving...")
-                save_configs(real_working, [])
-        else:
-            print(f"  TCP only: {tcp_delay} ms (Xray failed)")
+            print(f"Active config found: {cfg[:60]}...")
+            newly_active.append(cfg)
+            active_added_this_run += 1
+            state['active_added_total'] = state.get('active_added_total', 0) + 1
+            # Append to output file immediately
+            append_configs([cfg])
+            # Check batch limit for this run
+            if active_added_this_run >= batch_size:
+                print(f"Reached batch limit of {batch_size} active configs. Stopping.")
+                state['last_index'] = i
+                save_state(state)
+                return
 
-    # 4. ذخیره نهایی
-    print(f"Total real working configs: {len(real_working)}")
-    print(f"Total TCP only configs: {len(tcp_alive) - len(real_working)}")
-    save_configs(real_working, [])
+        state['last_index'] = i
+        # Save state periodically
+        if i % 50 == 0:
+            save_state(state)
+            print(f"Progress: {i - start_idx + 1}/{len(remaining_configs)} tested, active this run: {active_added_this_run}")
+
+    # If loop finishes naturally, mark as finished
+    if state['last_index'] >= len(all_configs) - 1:
+        state['finished'] = True
+        print("All configs processed.")
+    save_state(state)
+    print(f"Run complete. Active configs added this run: {len(newly_active)}")
 
 if __name__ == "__main__":
     main()
