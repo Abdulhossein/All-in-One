@@ -103,28 +103,54 @@ def fetch_content(url: str) -> Optional[str]:
             time.sleep(2 ** attempt)
     return None
 
+# ----------------------------------------------------------------------
+# اعتبارسنجی کانفیگ (رفع مشکل کانفیگ‌های الکی)
+# ----------------------------------------------------------------------
+PROTOCOL_PATTERN = re.compile(r"^(vmess|vless|trojan|ss|socks)://")
+
+def validate_config(config: str) -> bool:
+    """
+    بررسی می‌کند که آیا رشتهٔ ورودی یک کانفیگ با فرمت حداقلی معتبر است.
+    این تابع برای حذف زباله‌ها پیش از ذخیره‌سازی استفاده می‌شود.
+    """
+    if not config or not PROTOCOL_PATTERN.match(config):
+        return False
+    # برای vmess:// باید JSON قابل قبولی داخل آن باشد
+    if config.startswith("vmess://"):
+        try:
+            encoded = config[8:]
+            decoded = base64.b64decode(normalize_b64(encoded)).decode("utf-8", errors="ignore")
+            data = json.loads(decoded)
+            return "add" in data and "port" in data
+        except Exception:
+            return False
+    # برای سایر پروتکل‌ها، همین که با پروتکل درست شروع شوند کافی است
+    return True
+
 def decode_possible_base64(text: str) -> List[str]:
+    """دیکود محتوا و برگرداندن فقط رشته‌هایی که شبیه کانفیگ معتبر هستند."""
     text = text.strip()
     if not text:
         return []
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if any(re.match(r"^(vmess|vless|trojan|ss|socks)://", line) for line in lines):
-        return lines
-    try:
-        decoded = base64.b64decode(normalize_b64(text)).decode("utf-8", errors="ignore")
-        decoded_lines = [line.strip() for line in decoded.splitlines() if line.strip()]
-        if any(re.match(r"^(vmess|vless|trojan|ss|socks)://", line) for line in decoded_lines):
-            return decoded_lines
-    except Exception:
-        pass
-    try:
-        decoded = base64.urlsafe_b64decode(normalize_b64(text)).decode("utf-8", errors="ignore")
-        decoded_lines = [line.strip() for line in decoded.splitlines() if line.strip()]
-        if any(re.match(r"^(vmess|vless|trojan|ss|socks)://", line) for line in decoded_lines):
-            return decoded_lines
-    except Exception:
-        pass
-    return lines
+
+    # اگر خطوط از قبل plain text با پروتکل درست باشند
+    valid_lines = [l for l in lines if PROTOCOL_PATTERN.match(l)]
+    if valid_lines:
+        return valid_lines
+
+    candidates = []
+    # تلاش برای دیکود base64
+    for b64func in [base64.b64decode, base64.urlsafe_b64decode]:
+        try:
+            decoded = b64func(normalize_b64(text)).decode("utf-8", errors="ignore")
+            decoded_lines = [line.strip() for line in decoded.splitlines() if line.strip()]
+            valid = [l for l in decoded_lines if PROTOCOL_PATTERN.match(l)]
+            if valid:
+                return valid
+        except Exception:
+            continue
+    return []
 
 def extract_sub_links_from_yaml(content: str, base_url: str) -> List[str]:
     pattern = r"(https?://[^\s\"']+sub_\d+\.txt[^\s\"']*)"
@@ -135,6 +161,7 @@ def extract_sub_links_from_yaml(content: str, base_url: str) -> List[str]:
     return [urljoin(base_url, f"sub_{n}.txt") for n in sorted(set(sub_names), key=int)]
 
 def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
+    """استخراج host و port از کانفیگ. اگر ناموفق بود None برمی‌گرداند."""
     try:
         if config.startswith("vmess://"):
             encoded = config[8:]
@@ -175,9 +202,15 @@ def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
     return None
 
 def test_config_alive(config: str, timeout: float = CONNECT_TIMEOUT) -> bool:
+    """
+    تست زنده بودن یک کانفیگ.
+    اگر نتوان سرور را استخراج کرد، قطعاً زنده نیست (False برمی‌گردانیم
+    تا کانفیگ‌های نامعتبر وارد فایل نهایی نشوند).
+    """
     server = parse_server_from_config(config)
     if not server:
-        return True
+        # اصلاح کلیدی: کانفیگی که سرور ندارد را زنده فرض نکنیم
+        return False
     host, port = server
     sock = None
     try:
@@ -215,10 +248,10 @@ def save_state(state: Dict) -> None:
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # ----------------------------------------------------------------------
-# فچ تمام کانفیگ‌های خام
+# فچ تمام کانفیگ‌های خام (با فیلتر اولیه)
 # ----------------------------------------------------------------------
 def fetch_all_raw_configs(subs_file: Path) -> List[str]:
-    """دانلود تمام لینک‌ها، دیکود و برگرداندن لیست یکتای کانفیگ‌های خام."""
+    """دانلود تمام لینک‌ها، دیکود، اعتبارسنجی و برگرداندن لیست یکتای کانفیگ‌های معتبر."""
     links = load_subscription_links(subs_file)
     valid_links = [l for l in links if l and not is_self_reference(l)]
     if not valid_links:
@@ -238,10 +271,13 @@ def fetch_all_raw_configs(subs_file: Path) -> List[str]:
                 if not sub_content:
                     continue
                 configs = decode_possible_base64(sub_content)
-                raw_set.update(configs)
+                # اعمال فیلتر validate_config برای حذف زباله‌ها
+                filtered = [c for c in configs if validate_config(c)]
+                raw_set.update(filtered)
         else:
             configs = decode_possible_base64(content)
-            raw_set.update(configs)
+            filtered = [c for c in configs if validate_config(c)]
+            raw_set.update(filtered)
     return list(raw_set)
 
 def write_raw_configs(raw_configs: List[str]) -> None:
@@ -271,29 +307,24 @@ def process_batch(raw_configs: List[str],
     total = len(raw_configs)
 
     while idx < total:
-        # کنترل زمان کلی
         elapsed = time.monotonic() - start_time
-        if elapsed > time_limit - 60:  # یک دقیقه حاشیه امن
+        if elapsed > time_limit - 60:
             print("Time limit approaching, stopping.")
             break
-
-        # محدودیت تعداد تست
         if tested >= max_tests:
             print("Test limit reached.")
             break
-
-        # محدودیت کانفیگ زنده
         if len(alive) >= max_alive:
             print("Alive limit reached.")
             break
 
-        # پردازش گروهی
         batch_end = min(idx + TEST_BATCH_SIZE, total)
         batch = raw_configs[idx:batch_end]
         for cfg in batch:
             tested += 1
             if tested > max_tests or len(alive) >= max_alive:
                 break
+            # test_config_alive حالا دیگر کانفیگ نامعتبر را False می‌دهد
             if test_config_alive(cfg):
                 alive.add(cfg)
         idx = batch_end
@@ -357,19 +388,17 @@ def main():
         raw_configs = fetch_all_raw_configs(SUBS_FILE)
         if not raw_configs:
             print("No configs fetched. Skipping cycle.")
-            # در صورت خطا وضعیت را تغییر نمی‌دهیم تا دفعهٔ بعد دوباره تلاش شود
             SESSION.close()
             return
 
         write_raw_configs(raw_configs)
-        print(f"Fetched {len(raw_configs)} raw configs.")
+        print(f"Fetched {len(raw_configs)} valid raw configs (junk filtered).")
 
         state["phase"] = "process"
         state["current_index"] = 0
-        state["new_cycle"] = True   # پرچم چرخهٔ جدید
+        state["new_cycle"] = True
         save_state(state)
 
-        # حالا بلافاصله یک دسته پردازش می‌کنیم
         phase = "process"
         new_cycle = True
 
@@ -394,13 +423,10 @@ def main():
 
     print(f"Batch: tested up to index {next_index}, found {len(alive_new)} alive, completed={completed}")
 
-    # به‌روزرسانی state
     state["current_index"] = next_index
     if completed:
-        # چرخه تمام شد، دور بعدی fetch
         state["phase"] = "fetch"
         state["new_cycle"] = True
-        # فایل raw_configs را پاک می‌کنیم
         if RAW_CONFIGS_FILE.exists():
             RAW_CONFIGS_FILE.unlink()
     else:
@@ -411,17 +437,14 @@ def main():
 
     # مدیریت فایل نهایی
     if new_cycle:
-        # چرخهٔ جدید: فایل نهایی را کاملاً با کانفیگ‌های این دسته جایگزین کن
         print("New cycle: rebuilding final file with fresh configs.")
         final_configs = alive_new
     else:
-        # ادامهٔ چرخه: کانفیگ‌های زندهٔ جدید را به فایل موجود اضافه کن
         _, existing_configs = load_existing_configs(FILE_PATH)
         print(f"Merging {len(alive_new)} new into existing {len(existing_configs)}.")
         final_configs = existing_configs.union(alive_new)
 
-    # همیشه فایل نهایی را ذخیره کن (حتّی اگر خالی شد که نادر است)
-    header, _ = load_existing_configs(FILE_PATH)  # هدر را از فایل موجود یا پیش‌فرض می‌گیرد
+    header, _ = load_existing_configs(FILE_PATH)
     if not header:
         header = HEADER_LINES.copy()
     save_configs_atomic(header, final_configs, FILE_PATH)
