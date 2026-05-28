@@ -13,10 +13,15 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# ----------------------------------------------------------------------
+# مسیرها و ثابت‌ها (FAIL‑SAFE)
+# ----------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent.parent
 
+# فایل خروجی اصلی – همیشه در root ریپو ایجاد می‌شود
 FILE_PATH = REPO_ROOT / "v2rays"
+
 SUBS_FILE = REPO_ROOT / "subscriptions.txt"
 RUNTIME_DIR = BASE_DIR / "runtime"
 STATE_FILE = RUNTIME_DIR / "update_state.json"
@@ -32,14 +37,27 @@ HEADER_LINES = [
     "#profile-web-page-url: https://github.com/Abdulhossein/All-in-One/edit/main/v2ray",
 ]
 
-MAX_LINKS_PER_RUN = 3
-MAX_TESTS_PER_RUN = 2500
-CONNECT_TIMEOUT = 3.0
-HTTP_TIMEOUT = 20
+# ----------------------------------------------------------------------
+# محدودیت‌های گیتهاب
+# ----------------------------------------------------------------------
+MAX_LINKS_PER_RUN = 3        # تعداد سابسکریپشن‌ها در هر اجرا
+MAX_TESTS_PER_RUN = 500      # کاهش تست‌ها برای صرفه‌جویی در منابع
+CONNECT_TIMEOUT = 1.5        # ثانیه (کمتر از قبل)
+HTTP_TIMEOUT = 15            # ثانیه
+TEST_BATCH_SIZE = 20         # تست گروهی برای کاهش sleep
 DEFAULT_CURSOR = 0
 
+# ----------------------------------------------------------------------
+# توابع کمکی
+# ----------------------------------------------------------------------
 def ensure_runtime():
+    """ایجاد پوشه‌های ضروری در صورت عدم وجود (fail‑safe)."""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+def ensure_subscriptions_file():
+    """اگر subscriptions.txt وجود نداشت، یک فایل خالی ایجاد کن."""
+    if not SUBS_FILE.exists():
+        SUBS_FILE.touch()
 
 def clean_url(url: str) -> str:
     return url.split("#", 1)[0].strip()
@@ -67,26 +85,31 @@ def create_session_with_retries(retries=3, backoff_factor=0.5):
     session.mount("https://", adapter)
     return session
 
+# Session global (با بستن صریح در انتها)
 SESSION = create_session_with_retries()
 
 def fetch_content(url: str) -> Optional[str]:
-    try:
-        resp = SESSION.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
-        resp.raise_for_status()
-        return resp.text
-    except Exception as e:
-        pass
+    """دریافت محتوا با ۲ بار تلاش مجدد (fail‑safe)."""
+    for attempt in range(3):
+        try:
+            resp = SESSION.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            if attempt == 2:
+                print(f"Failed to fetch {url}: {e}")
+                return None
+            time.sleep(2 ** attempt)  # backoff
     return None
 
 def decode_possible_base64(text: str) -> List[str]:
     text = text.strip()
     if not text:
         return []
-
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # اگر خطوط از قبل plain text باشند
     if any(re.match(r"^(vmess|vless|trojan|ss|socks)://", line) for line in lines):
         return lines
-
     try:
         decoded = base64.b64decode(normalize_b64(text)).decode("utf-8", errors="ignore")
         decoded_lines = [line.strip() for line in decoded.splitlines() if line.strip()]
@@ -94,7 +117,6 @@ def decode_possible_base64(text: str) -> List[str]:
             return decoded_lines
     except Exception:
         pass
-
     try:
         decoded = base64.urlsafe_b64decode(normalize_b64(text)).decode("utf-8", errors="ignore")
         decoded_lines = [line.strip() for line in decoded.splitlines() if line.strip()]
@@ -102,12 +124,10 @@ def decode_possible_base64(text: str) -> List[str]:
             return decoded_lines
     except Exception:
         pass
-
     return lines
 
 def extract_sub_links_from_yaml(content: str, base_url: str) -> List[str]:
-    # Using raw strings to perfectly preserve regex syntax without double backslashes
-    pattern = r"(https?://[^\s"']+sub_\d+\.txt[^\s"']*)"
+    pattern = r"(https?://[^\s\"']+sub_\d+\.txt[^\s\"']*)"
     found = re.findall(pattern, content)
     if found:
         return sorted(set(found))
@@ -124,12 +144,10 @@ def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
             port = data.get("port")
             if host and port:
                 return host, int(port)
-
         elif config.startswith("vless://") or config.startswith("trojan://"):
             parsed = urlparse(config)
             if parsed.hostname and parsed.port:
                 return parsed.hostname, parsed.port
-
         elif config.startswith("ss://"):
             rest = config[5:]
             if "#" in rest:
@@ -148,33 +166,34 @@ def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
                     if ":" in host_port:
                         host, port = host_port.rsplit(":", 1)
                         return host, int(port)
-
         elif config.startswith("socks://"):
             parsed = urlparse(config)
             if parsed.hostname and parsed.port:
                 return parsed.hostname, parsed.port
-
     except Exception:
         pass
     return None
 
 def test_config_alive(config: str, timeout: float = CONNECT_TIMEOUT) -> bool:
+    """تست اتصال TCP با مدیریت ایمن سوکت."""
     server = parse_server_from_config(config)
     if not server:
-        return True
+        return True  # اگر سرور شناسایی نشد، آن را زنده فرض کن
     host, port = server
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         result = sock.connect_ex((host, port))
-        sock.close()
-        if result == 0:
-            return True
-        return False
+        return result == 0
     except Exception:
         return False
+    finally:
+        if sock:
+            sock.close()
 
 def load_existing_configs(file_path: Path) -> Tuple[List[str], Set[str]]:
+    """بارگذاری کانفیگ‌های موجود با fail‑safe."""
     header = []
     configs = set()
     try:
@@ -193,13 +212,19 @@ def load_existing_configs(file_path: Path) -> Tuple[List[str], Set[str]]:
     return header, configs
 
 def save_configs(header: List[str], configs: Set[str], file_path: Path) -> None:
-    with file_path.open("w", encoding="utf-8") as f:
-        for line in header:
-            f.write(line + "
-")
-        for cfg in sorted(configs):
-            f.write(cfg + "
-")
+    """ذخیره‌سازی اتمیک با نوشتن در فایل موقت و سپس جایگزینی."""
+    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            for line in header:
+                f.write(line + "\n")
+            for cfg in sorted(configs):
+                f.write(cfg + "\n")
+        tmp_path.replace(file_path)  # عملیات اتمیک روی اکثر فایل‌سیستم‌ها
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
 def load_subscription_links(subs_file: Path) -> List[str]:
     links = []
@@ -227,7 +252,6 @@ def save_state(state: Dict) -> None:
 def process_subscription_link(link: str) -> Tuple[Set[str], Dict[str, int]]:
     stats = {"extracted": 0, "tested": 0, "alive": 0}
     collected = set()
-
     content = fetch_content(link)
     if not content:
         return collected, stats
@@ -241,34 +265,43 @@ def process_subscription_link(link: str) -> Tuple[Set[str], Dict[str, int]]:
                 continue
             configs = decode_possible_base64(sub_content)
             stats["extracted"] += len(configs)
-            for cfg in configs:
+            # تست گروهی برای کاهش sleep
+            for i in range(0, len(configs), TEST_BATCH_SIZE):
+                batch = configs[i:i+TEST_BATCH_SIZE]
+                for cfg in batch:
+                    stats["tested"] += 1
+                    if stats["tested"] > MAX_TESTS_PER_RUN:
+                        return collected, stats
+                    if test_config_alive(cfg):
+                        collected.add(cfg)
+                        stats["alive"] += 1
+                time.sleep(0.1)  # pause کوتاه بین batch ها
+    else:
+        configs = decode_possible_base64(content)
+        stats["extracted"] += len(configs)
+        for i in range(0, len(configs), TEST_BATCH_SIZE):
+            batch = configs[i:i+TEST_BATCH_SIZE]
+            for cfg in batch:
                 stats["tested"] += 1
                 if stats["tested"] > MAX_TESTS_PER_RUN:
                     return collected, stats
                 if test_config_alive(cfg):
                     collected.add(cfg)
                     stats["alive"] += 1
-            time.sleep(0.5)
-    else:
-        configs = decode_possible_base64(content)
-        stats["extracted"] += len(configs)
-        for cfg in configs:
-            stats["tested"] += 1
-            if stats["tested"] > MAX_TESTS_PER_RUN:
-                return collected, stats
-            if test_config_alive(cfg):
-                collected.add(cfg)
-                stats["alive"] += 1
+            time.sleep(0.1)
 
     return collected, stats
 
+# ----------------------------------------------------------------------
+# MAIN
+# ----------------------------------------------------------------------
 def main():
+    # اطمینان از وجود مسیرها و فایل‌ها
     ensure_runtime()
+    ensure_subscriptions_file()
 
     header, existing_configs = load_existing_configs(FILE_PATH)
     links = load_subscription_links(SUBS_FILE)
-
-    # Filter out empty or self-referential links
     valid_links = [l for l in links if l and not is_self_reference(l)]
 
     if not valid_links:
@@ -277,8 +310,6 @@ def main():
 
     state = load_state()
     cursor = state.get("cursor", DEFAULT_CURSOR)
-
-    # If cursor is past the end, reset it
     if cursor >= len(valid_links):
         cursor = 0
 
@@ -289,17 +320,16 @@ def main():
 
     new_configs = set()
     total_tested = 0
-
     for link in current_batch:
         print(f"Processing: {link}")
         collected, stats = process_subscription_link(link)
         new_configs.update(collected)
         total_tested += stats["tested"]
-        print(f"  -> Extracted: {stats['extracted']}, Tested: {stats['tested']}, Alive: {stats['alive']}")
+        print(f" -> Extracted: {stats['extracted']}, Tested: {stats['tested']}, Alive: {stats['alive']}")
 
     print(f"Total new alive configs found in this run: {len(new_configs)}")
 
-    # Load staged configs if any
+    # بارگذاری staged قبلی
     staged_configs = set()
     if STAGED_FILE.exists():
         _, staged = load_existing_configs(STAGED_FILE)
@@ -309,7 +339,7 @@ def main():
     merged_configs = staged_configs.union(new_configs)
 
     if end_index >= len(valid_links):
-        # Batch complete, run liveness on existing + merge all
+        # پایان چرخه – فایل اصلی را به‌روز کن
         print("Full cycle complete! Testing existing configs for liveness...")
         alive_existing = set()
         for cfg in existing_configs:
@@ -320,22 +350,21 @@ def main():
         print(f"Final merge: {len(final_configs)} alive configs. Writing to main file.")
         save_configs(header, final_configs, FILE_PATH)
 
-        # Cleanup staged
+        # پاکسازی فایل staged
         if STAGED_FILE.exists():
             STAGED_FILE.unlink()
 
-        # Reset state
         state["cursor"] = 0
         save_state(state)
-
     else:
-        # Save progress to staged
+        # وسط چرخه – ذخیره در staged
         print(f"Cycle in progress. Staging {len(merged_configs)} configs.")
         save_configs(header, merged_configs, STAGED_FILE)
-
-        # Advance state
         state["cursor"] = end_index
         save_state(state)
+
+    # بستن session برای آزادسازی منابع
+    SESSION.close()
 
 if __name__ == "__main__":
     main()
