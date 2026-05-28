@@ -10,6 +10,11 @@ on:
   schedule:
     - cron: '0 */3 * * *'   # هر ۳ ساعت
 
+# از اجرای هم‌زمان جلوگیری کن (فقط یک job فعال باشد)
+concurrency:
+  group: config-update
+  cancel-in-progress: false   # صبر کن تا قبلی تمام شود
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -20,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,6 +53,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # فقط فایل‌هایی که باید commit شوند
           git add v2rays subscriptions.txt tools/config-update/runtime/ || true
 
           if git diff --cached --quiet; then
@@ -56,15 +63,5 @@ jobs:
 
           git commit -m "Auto-update configs [skip ci]"
 
-          for i in 1 2 3; do
-            if git push origin HEAD:main; then
-              echo "Push successful"
-              exit 0
-            fi
-            echo "Push attempt $i failed, retrying after 5 seconds..."
-            sleep 5
-            git fetch origin main
-            git rebase origin/main || git rebase --abort
-          done
-          echo "Failed to push after 3 attempts"
-          exit 1
+          # حالا که concurrency فعال است، یک push ساده کافیست
+          git push origin HEAD:main
