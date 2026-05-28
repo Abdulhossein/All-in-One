@@ -13,11 +13,9 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ----- Configuration -----
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent.parent
 
-# فایل نهایی در همان روت قرار می‌گیرد
 FILE_PATH = REPO_ROOT / "v2rays"
 SUBS_FILE = REPO_ROOT / "subscriptions.txt"
 RUNTIME_DIR = BASE_DIR / "runtime"
@@ -47,7 +45,6 @@ def clean_url(url: str) -> str:
     return url.split("#", 1)[0].strip()
 
 def is_self_reference(url: str) -> bool:
-    # جلوگیری از خواندن خروجی قبلی اسکریپت به‌عنوان ورودی جدید
     return "Abdulhossein/All-in-One" in url and "v2rays" in url
 
 def normalize_b64(text: str) -> str:
@@ -78,8 +75,8 @@ def fetch_content(url: str) -> Optional[str]:
         resp.raise_for_status()
         return resp.text
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return None
+        pass
+    return None
 
 def decode_possible_base64(text: str) -> List[str]:
     text = text.strip()
@@ -156,7 +153,7 @@ def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
             if parsed.hostname and parsed.port:
                 return parsed.hostname, parsed.port
 
-    except Exception as e:
+    except Exception:
         pass
     return None
 
@@ -202,7 +199,6 @@ def save_configs(header: List[str], configs: Set[str], file_path: Path) -> None:
         for cfg in sorted(configs):
             f.write(cfg + "
 ")
-    print(f"Saved {len(configs)} configs to {file_path}")
 
 def load_subscription_links(subs_file: Path) -> List[str]:
     links = []
@@ -231,7 +227,6 @@ def process_subscription_link(link: str) -> Tuple[Set[str], Dict[str, int]]:
     stats = {"extracted": 0, "tested": 0, "alive": 0}
     collected = set()
 
-    print(f"Processing: {link}")
     content = fetch_content(link)
     if not content:
         return collected, stats
@@ -252,7 +247,6 @@ def process_subscription_link(link: str) -> Tuple[Set[str], Dict[str, int]]:
                 if test_config_alive(cfg):
                     collected.add(cfg)
                     stats["alive"] += 1
-            # Delay between sub-links to avoid HTTP 429 Too Many Requests
             time.sleep(0.5)
     else:
         configs = decode_possible_base64(content)
@@ -275,7 +269,6 @@ def main():
 
     header, existing_configs = load_existing_configs(FILE_PATH)
     
-    # اینجا فایل STAGED خوانده می‌شود تا در طول چرخه استیت حفظ شود
     if STAGED_FILE.exists():
         _, staged_existing_configs = load_existing_configs(STAGED_FILE)
     else:
@@ -289,12 +282,7 @@ def main():
 
     additional_links = load_subscription_links(SUBS_FILE)
     all_links = default_links + additional_links
-    
-    # فیلتر کردن خروجی خود ریپو برای جلوگیری از لوپ بی‌نهایت
     all_links = [link for link in all_links if not is_self_reference(link)]
-
-    print(f"Total valid subscription links to process: {len(all_links)}")
-    print(f"Starting cursor: {cursor}")
 
     if cursor >= len(all_links):
         cursor = 0
@@ -313,15 +301,10 @@ def main():
         total_tested += stats["tested"]
         new_configs.update(collected)
         summary.append((link, stats))
-        print(f"  -> Extracted: {stats['extracted']} | Tested: {stats['tested']} | Alive: {stats['alive']}")
-        
-        # Delay اصلی بین پردازش لینک‌ها
         time.sleep(1.0)
 
-    # مرج کردن با دیتای ساخته‌شده در طول همین چرخه
     merged_configs = staged_existing_configs.union(new_configs)
     
-    # ذخیره در فایل Staged (برای دورهای بعدی تا قبل از اتمام Cycle)
     save_configs(header, merged_configs, STAGED_FILE)
 
     next_cursor = end if end < len(all_links) else 0
@@ -336,15 +319,7 @@ def main():
         }
     )
 
-    # فایل اصلی (v2rays) به‌روز می‌شود تا همیشه نتیجهٔ تا اینجای چرخه را منعکس کند
     save_configs(header, merged_configs, FILE_PATH)
-
-    print("
-===== Source Summary =====")
-    for link, stats in summary:
-        print(link)
-        print(f"  Alive/Tested: {stats['alive']}/{stats['tested']}")
-    print("==========================")
 
 if __name__ == "__main__":
     main()
