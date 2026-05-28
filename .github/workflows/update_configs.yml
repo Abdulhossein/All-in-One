@@ -32,13 +32,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests urllib3
 
-      - name: Add new subscription links (if provided)
-        if: github.event_name == 'workflow_dispatch' && inputs.new_subs
+      - name: Add new subscription links
+        if: github.event_name == 'workflow_dispatch' && inputs.new_subs != ''
+        env:
+          NEW_SUBS: ${{ inputs.new_subs }}
         run: |
           mkdir -p tools/config-update/runtime
-          printf '%s
-' "${{ inputs.new_subs }}" | tr ',' '
-' | sed '/^[[:space:]]*$/d' >> subscriptions.txt
+          printf '%s\n' "$NEW_SUBS" | tr ',' '\n' | sed '/^[[:space:]]*$/d' >> subscriptions.txt
 
       - name: Run config updater
         run: python tools/config-update/config_updater.py
