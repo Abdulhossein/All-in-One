@@ -3,7 +3,7 @@ name: Update Live V2Ray Configs
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */7 * * *'
+    - cron: '0 0 */3 * *'
       timezone: 'Asia/Tehran'
 
 concurrency:
