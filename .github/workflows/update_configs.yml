@@ -8,7 +8,6 @@ on:
         required: false
         type: string
   schedule:
-    # Frequent trigger; script itself enforces ~8.5h cadence
     - cron: '17 */4 * * *'
 
 concurrency:
@@ -18,7 +17,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     permissions:
       contents: write
 
@@ -48,40 +47,28 @@ jobs:
           printf '%s\n' "${{ inputs.new_subs }}" | tr ',' '\n' | sed '/^[[:space:]]*$/d' >> subscriptions.txt
 
       - name: Run config updater
-        id: config_updater
-        continue-on-error: true
+        id: updater
         run: |
           python tools/config-update/config_updater.py
 
       - name: Commit and push changes
-        if: always()
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add v2rays subscriptions.txt || true
-          git add tools/config-update/runtime/update_state.json || true
-          git add tools/config-update/runtime/v2rays.next || true
-
+          git add v2rays subscriptions.txt tools/config-update/runtime/update_state.json tools/config-update/runtime/v2rays.next || true
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
-
           git commit -m "Auto-update configs batch progress [skip ci]"
-
           for i in 1 2 3; do
             if git push origin HEAD:main; then
               echo "Push successful"
               exit 0
             fi
-            echo "Push attempt $i failed, retrying after 5 seconds..."
             sleep 5
             git fetch origin main
             git rebase origin/main || git rebase --abort
           done
-
-          echo "Failed to push after 3 attempts"
           exit 1
