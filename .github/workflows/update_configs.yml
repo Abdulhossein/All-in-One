@@ -1,4 +1,3 @@
-
 name: Update Configs
 
 on:
@@ -16,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -47,10 +45,10 @@ jobs:
       - name: Commit and push changes
         run: |
           set -euo pipefail
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # فقط فایل‌هایی که باید commit شوند
           git add v2rays subscriptions.txt tools/config-update/runtime/update_state.json tools/config-update/runtime/v2rays.next || true
 
           if git diff --cached --quiet; then
@@ -70,6 +68,5 @@ jobs:
             git fetch origin main
             git rebase origin/main || git rebase --abort
           done
-
           echo "Failed to push after 3 attempts"
           exit 1
