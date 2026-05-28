@@ -1,9 +1,10 @@
 import base64
-import time 
 import json
 import os
 import re
 import socket
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
@@ -12,9 +13,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# ----- Configuration -----
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parent.parent
 
+# فایل نهایی در همان روت قرار می‌گیرد
 FILE_PATH = REPO_ROOT / "v2rays"
 SUBS_FILE = REPO_ROOT / "subscriptions.txt"
 RUNTIME_DIR = BASE_DIR / "runtime"
@@ -31,20 +34,21 @@ HEADER_LINES = [
     "#profile-web-page-url: https://github.com/Abdulhossein/All-in-One/edit/main/v2ray",
 ]
 
-MAX_LINKS_PER_RUN = 2
+MAX_LINKS_PER_RUN = 3
 MAX_TESTS_PER_RUN = 2500
 CONNECT_TIMEOUT = 3.0
 HTTP_TIMEOUT = 20
 DEFAULT_CURSOR = 0
 
-
 def ensure_runtime():
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-
 
 def clean_url(url: str) -> str:
     return url.split("#", 1)[0].strip()
 
+def is_self_reference(url: str) -> bool:
+    # جلوگیری از خواندن خروجی قبلی اسکریپت به‌عنوان ورودی جدید
+    return "Abdulhossein/All-in-One" in url and "v2rays" in url
 
 def normalize_b64(text: str) -> str:
     text = text.strip()
@@ -52,7 +56,6 @@ def normalize_b64(text: str) -> str:
     if pad:
         text += "=" * pad
     return text
-
 
 def create_session_with_retries(retries=3, backoff_factor=0.5):
     session = requests.Session()
@@ -67,9 +70,7 @@ def create_session_with_retries(retries=3, backoff_factor=0.5):
     session.mount("https://", adapter)
     return session
 
-
 SESSION = create_session_with_retries()
-
 
 def fetch_content(url: str) -> Optional[str]:
     try:
@@ -79,7 +80,6 @@ def fetch_content(url: str) -> Optional[str]:
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return None
-
 
 def decode_possible_base64(text: str) -> List[str]:
     text = text.strip()
@@ -108,7 +108,6 @@ def decode_possible_base64(text: str) -> List[str]:
 
     return lines
 
-
 def extract_sub_links_from_yaml(content: str, base_url: str) -> List[str]:
     pattern = r"(https?://[^s"']+sub_d+.txt[^s"']*)"
     found = re.findall(pattern, content)
@@ -116,7 +115,6 @@ def extract_sub_links_from_yaml(content: str, base_url: str) -> List[str]:
         return sorted(set(found))
     sub_names = re.findall(r"sub_(d+).txt", content)
     return [urljoin(base_url, f"sub_{n}.txt") for n in sorted(set(sub_names), key=int)]
-
 
 def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
     try:
@@ -159,9 +157,8 @@ def parse_server_from_config(config: str) -> Optional[Tuple[str, int]]:
                 return parsed.hostname, parsed.port
 
     except Exception as e:
-        print(f"  Parse error: {e}")
+        pass
     return None
-
 
 def test_config_alive(config: str, timeout: float = CONNECT_TIMEOUT) -> bool:
     server = parse_server_from_config(config)
@@ -178,7 +175,6 @@ def test_config_alive(config: str, timeout: float = CONNECT_TIMEOUT) -> bool:
         return False
     except Exception:
         return False
-
 
 def load_existing_configs(file_path: Path) -> Tuple[List[str], Set[str]]:
     header = []
@@ -198,7 +194,6 @@ def load_existing_configs(file_path: Path) -> Tuple[List[str], Set[str]]:
         header = HEADER_LINES.copy()
     return header, configs
 
-
 def save_configs(header: List[str], configs: Set[str], file_path: Path) -> None:
     with file_path.open("w", encoding="utf-8") as f:
         for line in header:
@@ -207,8 +202,7 @@ def save_configs(header: List[str], configs: Set[str], file_path: Path) -> None:
         for cfg in sorted(configs):
             f.write(cfg + "
 ")
-    print(f"Saved {len(configs)} configs to {file_path} (header preserved).")
-
+    print(f"Saved {len(configs)} configs to {file_path}")
 
 def load_subscription_links(subs_file: Path) -> List[str]:
     links = []
@@ -222,7 +216,6 @@ def load_subscription_links(subs_file: Path) -> List[str]:
         pass
     return links
 
-
 def load_state() -> Dict:
     if not STATE_FILE.exists():
         return {"cursor": DEFAULT_CURSOR}
@@ -231,10 +224,8 @@ def load_state() -> Dict:
     except Exception:
         return {"cursor": DEFAULT_CURSOR}
 
-
 def save_state(state: Dict) -> None:
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 def process_subscription_link(link: str) -> Tuple[Set[str], Dict[str, int]]:
     stats = {"extracted": 0, "tested": 0, "alive": 0}
@@ -261,6 +252,8 @@ def process_subscription_link(link: str) -> Tuple[Set[str], Dict[str, int]]:
                 if test_config_alive(cfg):
                     collected.add(cfg)
                     stats["alive"] += 1
+            # Delay between sub-links to avoid HTTP 429 Too Many Requests
+            time.sleep(0.5)
     else:
         configs = decode_possible_base64(content)
         stats["extracted"] += len(configs)
@@ -274,7 +267,6 @@ def process_subscription_link(link: str) -> Tuple[Set[str], Dict[str, int]]:
 
     return collected, stats
 
-
 def main():
     ensure_runtime()
 
@@ -282,10 +274,12 @@ def main():
     cursor = int(state.get("cursor", DEFAULT_CURSOR))
 
     header, existing_configs = load_existing_configs(FILE_PATH)
-    staged_header, staged_existing_configs = load_existing_configs(FILE_PATH)
-
-    print(f"Loaded {len(existing_configs)} existing configs from final output.")
-    print(f"Loaded {len(staged_existing_configs)} existing configs from staged output.")
+    
+    # اینجا فایل STAGED خوانده می‌شود تا در طول چرخه استیت حفظ شود
+    if STAGED_FILE.exists():
+        _, staged_existing_configs = load_existing_configs(STAGED_FILE)
+    else:
+        staged_existing_configs = existing_configs.copy()
 
     default_links = [
         "https://raw.githubusercontent.com/hiddify/hiddify-app/refs/heads/main/test.configs/mahsa#Mahsa",
@@ -295,8 +289,11 @@ def main():
 
     additional_links = load_subscription_links(SUBS_FILE)
     all_links = default_links + additional_links
+    
+    # فیلتر کردن خروجی خود ریپو برای جلوگیری از لوپ بی‌نهایت
+    all_links = [link for link in all_links if not is_self_reference(link)]
 
-    print(f"Total subscription links to process: {len(all_links)}")
+    print(f"Total valid subscription links to process: {len(all_links)}")
     print(f"Starting cursor: {cursor}")
 
     if cursor >= len(all_links):
@@ -316,14 +313,15 @@ def main():
         total_tested += stats["tested"]
         new_configs.update(collected)
         summary.append((link, stats))
-        print(f"Processed links this run: {processed}")
-        print(f"Tested configs this run: {total_tested}")
-        print(f"Found {len(new_configs)} alive configs from current batch.")
+        print(f"  -> Extracted: {stats['extracted']} | Tested: {stats['tested']} | Alive: {stats['alive']}")
+        
+        # Delay اصلی بین پردازش لینک‌ها
+        time.sleep(1.0)
 
+    # مرج کردن با دیتای ساخته‌شده در طول همین چرخه
     merged_configs = staged_existing_configs.union(new_configs)
-
-    print(f"Merged configs so far: {len(merged_configs)} total.")
-
+    
+    # ذخیره در فایل Staged (برای دورهای بعدی تا قبل از اتمام Cycle)
     save_configs(header, merged_configs, STAGED_FILE)
 
     next_cursor = end if end < len(all_links) else 0
@@ -334,19 +332,18 @@ def main():
             "processed_this_run": processed,
             "tested_this_run": total_tested,
             "alive_this_run": len(new_configs),
-            "updated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+            "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
     )
 
+    # فایل اصلی (v2rays) به‌روز می‌شود تا همیشه نتیجهٔ تا اینجای چرخه را منعکس کند
     save_configs(header, merged_configs, FILE_PATH)
 
     print("
 ===== Source Summary =====")
     for link, stats in summary:
         print(link)
-        print(f"  Extracted: {stats['extracted']}")
-        print(f"  Tested:    {stats['tested']}")
-        print(f"  Alive:     {stats['alive']}")
+        print(f"  Alive/Tested: {stats['alive']}/{stats['tested']}")
     print("==========================")
 
 if __name__ == "__main__":
