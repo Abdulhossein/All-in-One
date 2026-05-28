@@ -7,5 +7,8 @@
   "source_total": 608,
   "last_processed_count": 2,
   "last_tested_count": 2174,
-  "updated_this_run": false
+  "updated_this_run": false,
+  "phase": "process",
+  "current_index": 1700,
+  "new_cycle": false
 }
