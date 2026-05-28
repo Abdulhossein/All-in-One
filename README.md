@@ -8,7 +8,7 @@ It runs on a schedule to keep the configs fresh and usable.
 Simply copy the subscription links below and paste it into your VPN client (like Hiddify, V2RayN, V2RayNG, Streisand, Fair VPN, etc.):
 
 ```
-https://raw.githubusercontent.com/Abdulhossein/All-in-One/refs/heads/main/v2ray
+https://raw.githubusercontent.com/Abdulhossein/All-in-One/refs/heads/main/v2rays
 
 ```
 ```
